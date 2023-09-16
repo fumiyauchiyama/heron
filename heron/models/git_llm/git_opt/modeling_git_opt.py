@@ -147,8 +147,6 @@ class GitOPTModel(OPTModel):
         past_key_values_length,
         memory_key_padding_mask=None,
     ):
-        print("tgt_mask")
-        print(tgt_mask)
         num_tgt = tgt.shape[1]
         num_memory = memory.shape[1]
         device = tgt.device
@@ -178,10 +176,6 @@ class GitOPTModel(OPTModel):
 
         full_attention_mask = torch.cat((left, right), dim=1)[None, :]
 
-        print("full_attention_mask")
-        print(full_attention_mask)
-        print(full_attention_mask.shape)
-
         if memory_key_padding_mask is None:
             memory_key_padding_mask = torch.full(
                 (memory.shape[0], memory.shape[1]), fill_value=False, device=device
@@ -198,21 +192,13 @@ class GitOPTModel(OPTModel):
                 num_memory + past_key_values_length + num_tgt,
             )
         )
-        print("full_attention_mask expand")
-        print(full_attention_mask)
-        print(full_attention_mask.shape)
         full_attention_mask = full_attention_mask.clone()
         origin_left = full_attention_mask[:, :, :num_memory]
         update = zero_negative_infinity[:, None, :]
         full_attention_mask[:, :, :num_memory] = origin_left + update
-        print("update")
-        print(update)
-        print(update.shape)
+
         # add axis for multi-head
         full_attention_mask = full_attention_mask[:, None, :, :]
-        print("full_attention_mask last")
-        print(full_attention_mask)
-        print(full_attention_mask.shape)
 
         return full_attention_mask
 
@@ -360,30 +346,18 @@ class GitOPTModel(OPTModel):
             past_key_values_length=past_key_values_length,
         )
 
-        print("combined_attention_mask")
-        print(combined_attention_mask)
-        print(combined_attention_mask.shape)
-
         if attention_mask is not None:
             # if the user provides an attention mask, we add it to the default one
             # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
-            print("attention_mask")
-            print(attention_mask)
             expanded_attn_mask = _expand_mask(
                 attention_mask, embedding_output.dtype, tgt_len=input_shape[-1]
             ).to(embedding_output.device)
-            print("expanded_attn_mask")
-            print(expanded_attn_mask)
             if past_key_values_length > 0:
                 expanded_attn_mask = expanded_attn_mask[:, :, -past_key_values_length:, :]
             else:
                 combined_attention_mask[
                     :, :, -input_shape[1] :, -input_shape[1] :
                 ] += expanded_attn_mask
-
-        print("combined_attention_mask expanded")
-        print(combined_attention_mask)
-        print(combined_attention_mask.shape)
 
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
@@ -418,12 +392,6 @@ class GitOPTModel(OPTModel):
                     None,
                 )
             else:
-                print("combined_attention_mask")
-                print(combined_attention_mask)
-                print(combined_attention_mask.shape)
-                print("hidden_states")
-                print(hidden_states)
-                print(hidden_states.shape)
                 layer_outputs = decoder_layer(
                     hidden_states,
                     attention_mask=combined_attention_mask,
