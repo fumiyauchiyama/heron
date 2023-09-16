@@ -62,7 +62,12 @@ def get_tokenizer(language_model_name: str) -> "Tokenizer":
         tokenizer.pad_token = tokenizer.eos_token
         return tokenizer
 
-    elif "Llama" in language_model_name:
+    elif (
+        "Llama" in language_model_name
+        or "WizardLM/WizardCoder-Python-7B-V1.0" in language_model_name
+        or "WizardLM/WizardCoder-Python-13B-V1.0" in language_model_name
+        or "WizardLM/WizardCoder-Python-34B-V1.0" in language_model_name
+    ):
         tokenizer = AutoTokenizer.from_pretrained(
             language_model_name, padding_side="right", use_fast=False
         )
@@ -70,6 +75,16 @@ def get_tokenizer(language_model_name: str) -> "Tokenizer":
         return tokenizer
 
     elif "opt" in language_model_name:
+        tokenizer = AutoTokenizer.from_pretrained(
+            language_model_name, padding_side="right", use_fast=False
+        )
+        return tokenizer
+
+    elif (
+        "WizardCoder-1B-V1.0" in language_model_name
+        or "WizardCoder-3B-V1.0" in language_model_name
+        or "WizardCoder-15B-V1.0" in language_model_name
+    ):
         tokenizer = AutoTokenizer.from_pretrained(
             language_model_name, padding_side="right", use_fast=False
         )

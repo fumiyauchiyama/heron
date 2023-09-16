@@ -51,7 +51,12 @@ def load_model(
                 language_model, config=git_config, torch_dtype=torch_dtype
             )
 
-        elif "Llama" in language_model:
+        elif (
+            "Llama" in language_model
+            or "WizardLM/WizardCoder-Python-7B-V1.0" in language_model
+            or "WizardLM/WizardCoder-Python-13B-V1.0" in language_model
+            or "WizardLM/WizardCoder-Python-34B-V1.0" in language_model
+        ):
             from .git_llm.git_llama import GitLlamaConfig, GitLlamaForCausalLM
 
             git_config = GitLlamaConfig.from_pretrained(language_model)
@@ -87,6 +92,25 @@ def load_model(
                 vision_model_name=model_config["vision_model_name"],
             )
             model = GitJapaneseStableLMAlphaForCausalLM.from_pretrained(
+                language_model, config=git_config, torch_dtype=torch_dtype
+            )
+
+        elif (
+            "WizardCoder-1B-V1.0" in language_model
+            or "WizardCoder-3B-V1.0" in language_model
+            or "WizardCoder-15B-V1.0" in language_model
+        ):
+            from .git_llm.git_wizard import (
+                GitGPTBigCodeConfig,
+                GitGPTBigCodeForCausalLM,
+            )
+
+            git_config = GitGPTBigCodeConfig.from_pretrained(language_model)
+            git_config.set_vision_configs(
+                num_image_with_embedding=num_image_with_embedding,
+                vision_model_name=model_config["vision_model_name"],
+            )
+            model = GitGPTBigCodeForCausalLM.from_pretrained(
                 language_model, config=git_config, torch_dtype=torch_dtype
             )
 

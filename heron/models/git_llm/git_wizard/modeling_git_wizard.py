@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""PyTorch GIT OPT model."""
+"""PyTorch GIT Wizard model."""
 
 import copy
 from typing import List, Optional, Tuple, Union
@@ -24,19 +24,19 @@ from torch.nn import CrossEntropyLoss
 from transformers import (
     CLIPVisionConfig,
     CLIPVisionModel,
-    LlamaConfig,
-    LlamaForCausalLM,
-    LlamaModel,
+    GPTBigCodeConfig,
+    GPTBigCodeForCausalLM,
+    GPTBigCodeModel,
 )
 from transformers.modeling_outputs import (
-    BaseModelOutputWithPast,
+    BaseModelOutputWithPastAndCrossAttentions,
     BaseModelOutputWithPooling,
     CausalLMOutputWithPast,
 )
 from transformers.models.git.modeling_git import GitProjection
 
 
-class GitLlamaConfig(LlamaConfig):
+class GitGPTBigCodeConfig(GPTBigCodeConfig):
     model_type = "git_llama"
 
     def __init__(
@@ -87,11 +87,11 @@ def _expand_mask(mask: torch.Tensor, dtype: torch.dtype, tgt_len: Optional[int] 
     return inverted_mask.masked_fill(inverted_mask.to(torch.bool), torch.finfo(dtype).min)
 
 
-class GitLlamaModel(LlamaModel):
-    config_class = GitLlamaConfig
+class GitGPTBigCodeModel(GPTBigCodeModel):
+    config_class = GitGPTBigCodeConfig
 
-    def __init__(self, config: LlamaConfig):
-        super(GitLlamaModel, self).__init__(config)
+    def __init__(self, config: GitGPTBigCodeConfig):
+        super(GitGPTBigCodeModel, self).__init__(config)
 
         # Git modules
         self.image_encoder = CLIPVisionModel.from_pretrained(config.vision_model_name)
@@ -130,8 +130,8 @@ class GitLlamaModel(LlamaModel):
         self, size: int, dtype: torch.dtype, device: torch.device
     ) -> torch.Tensor:
         # Default mask is for forward direction. Flip for backward direction.
-        mask = torch.triu(torch.ones(size, size, device=device, dtype=dtype), diagonal=1)
-        mask = mask.masked_fill(mask == 1, float("-inf"))
+        mask = torch.tril(torch.ones(size, size, device=device, dtype=dtype), diagonal=0)
+        # mask = mask.masked_fill(mask == 1, float("-inf"))
         return mask
 
     def create_attention_mask(
@@ -146,21 +146,21 @@ class GitLlamaModel(LlamaModel):
         num_memory = memory.shape[1]
         device = tgt.device
         dtype = tgt.dtype
-        top_left = torch.zeros((num_memory, num_memory), device=device, dtype=dtype)
+        top_left = torch.ones((num_memory, num_memory), device=device, dtype=dtype)
         top_right = torch.full(
             (num_memory, num_tgt + past_key_values_length),
-            float("-inf"),
+            float(0),
             device=tgt.device,
             dtype=dtype,
         )
-        bottom_left = torch.zeros(
+        bottom_left = torch.ones(
             (num_tgt, num_memory),
             dtype=dtype,
             device=tgt_mask.device,
         )
 
         if past_key_values_length > 0:
-            tgt_mask = torch.zeros(
+            tgt_mask = torch.ones(
                 (tgt_mask.shape[0], tgt_mask.shape[0] + past_key_values_length),
                 dtype=dtype,
                 device=tgt_mask.device,
@@ -179,7 +179,7 @@ class GitLlamaModel(LlamaModel):
         if memory_key_padding_mask.dtype != torch.bool:
             raise ValueError("Memory key padding mask must be a boolean tensor.")
         zero_negative_infinity = torch.zeros_like(memory_key_padding_mask, dtype=tgt.dtype)
-        zero_negative_infinity[memory_key_padding_mask] = float("-inf")
+        zero_negative_infinity[memory_key_padding_mask] = float(-1)
         full_attention_mask = full_attention_mask.expand(
             (
                 memory_key_padding_mask.shape[0],
@@ -200,32 +200,22 @@ class GitLlamaModel(LlamaModel):
     def forward(
         self,
         input_ids: Optional[torch.Tensor] = None,
+        past_key_values: Optional[List[torch.Tensor]] = None,
         attention_mask: Optional[torch.Tensor] = None,
+        token_type_ids: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
         pixel_values: Optional[torch.Tensor] = None,
+        head_mask: Optional[torch.Tensor] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        encoder_attention_mask: Optional[torch.Tensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-    ) -> Union[Tuple[torch.Tensor], BaseModelOutputWithPooling]:
-        r"""
-        past_key_values (`tuple(tuple(torch.FloatTensor))` of length `config.n_layers` with each tuple having 4 tensors of shape `(batch_size, num_heads, sequence_length - 1, embed_size_per_head)`):
-            Contains precomputed key and value hidden states of the attention blocks. Can be used to speed up decoding.
-
-            If `past_key_values` are used, the user can optionally input only the last `decoder_input_ids` (those that
-            don't have their past key value states given to this model) of shape `(batch_size, 1)` instead of all
-            `decoder_input_ids` of shape `(batch_size, sequence_length)`.
-        use_cache (`bool`, *optional*):
-            If set to `True`, `past_key_values` key value states are returned and can be used to speed up decoding (see
-            `past_key_values`).
-
-        Returns:"""
+    ) -> Union[Tuple, BaseModelOutputWithPastAndCrossAttentions]:
         output_attentions = (
-            output_attentions
-            if output_attentions is not None
-            else self.config.output_hidden_states
+            output_attentions if output_attentions is not None else self.config.output_attentions
         )
         output_hidden_states = (
             output_hidden_states
@@ -240,20 +230,33 @@ class GitLlamaModel(LlamaModel):
                 "You cannot specify both input_ids and inputs_embeds at the same time"
             )
         elif input_ids is not None:
+            self.warn_if_padding_and_no_attention_mask(input_ids, attention_mask)
             input_shape = input_ids.size()
+            input_ids = input_ids.view(-1, input_shape[-1])
+            batch_size = input_ids.shape[0]
         elif inputs_embeds is not None:
             input_shape = inputs_embeds.size()[:-1]
+            batch_size = inputs_embeds.shape[0]
         else:
             raise ValueError("You have to specify either input_ids or inputs_embeds")
 
-        batch_size, seq_length = input_shape
-        seq_length_with_past = seq_length
+        if batch_size <= 0:
+            raise ValueError("batch_size has to be defined and > 0")
 
-        past_key_values_length = 0
+        device = input_ids.device if input_ids is not None else inputs_embeds.device
 
-        if past_key_values is not None:
-            past_key_values_length = past_key_values[0][0].shape[2]
-            seq_length_with_past = seq_length_with_past + past_key_values_length
+        if token_type_ids is not None:
+            token_type_ids = token_type_ids.view(-1, input_shape[-1])
+        if position_ids is not None:
+            position_ids = position_ids.view(-1, input_shape[-1])
+
+        seq_length_with_past = input_shape[-1]
+
+        if past_key_values is None:
+            past_length = 0
+        else:
+            past_length = past_key_values[0].size(-2)
+            seq_length_with_past = seq_length_with_past + past_length
 
         # GIT Vision Encoder part
         projected_visual_features = None
@@ -280,156 +283,220 @@ class GitLlamaModel(LlamaModel):
             projected_visual_features = self.visual_projection(visual_features)
 
         if inputs_embeds is None:
-            inputs_embeds = self.embed_tokens(input_ids)
+            inputs_embeds = self.wte(input_ids)
 
-        # embed positions
-        if attention_mask is None:
-            attention_mask = torch.ones(
-                (batch_size, seq_length_with_past), dtype=torch.bool, device=inputs_embeds.device
+        # if attention_mask is not None and len(attention_mask.shape) == 2 and position_ids is None:
+        #     # create position_ids on the fly for batch generation
+        #     position_ids = attention_mask.long().cumsum(-1) - 1
+        #     position_ids.masked_fill_(attention_mask == 0, 1)
+        #     if past_length > 0:
+        #         position_ids = position_ids[:, past_length : input_shape[-1] + past_length :]
+        # elif position_ids is None:
+        #     position_ids = torch.arange(past_length, input_shape[-1] + past_length, dtype=torch.long, device=device)
+        #     position_ids = position_ids.unsqueeze(0).view(-1, input_shape[-1])
+
+        # Self-attention mask.
+        query_length = input_shape[-1]
+        key_length = past_length + query_length
+        # self_attention_mask = self.bias[None, key_length - query_length : key_length, :key_length]
+
+        # if attention_mask is not None:
+        #     self_attention_mask = self_attention_mask * attention_mask.view(batch_size, 1, -1).to(
+        #         dtype=torch.bool, device=self_attention_mask.device
+        #     )
+
+        # # MQA models: (batch_size, query_length, n_heads, key_length)
+        # MQAだと壊れる？
+        # # MHA models: (batch_size, n_heads, query_length, key_length)
+        # attention_mask = self_attention_mask.unsqueeze(2 if self.multi_query else 1)
+
+        # If a 2D or 3D attention mask is provided for the cross-attention
+        # we need to make broadcastable to [batch_size, num_heads, seq_length, seq_length]
+        if (
+            self.config.add_cross_attention
+            and encoder_hidden_states is not None
+            and encoder_attention_mask is not None
+        ):
+            if encoder_attention_mask.dim() == 2:
+                encoder_attention_mask.unsqueeze(1)
+            assert encoder_attention_mask.dim() == 3
+            encoder_attention_mask = encoder_attention_mask.bool().unsqueeze(
+                2 if self.multi_query else 1
             )
-
-        embedding_output = inputs_embeds
+        else:
+            encoder_attention_mask = None
 
         if projected_visual_features is None:
             projected_visual_features = torch.zeros(
-                (embedding_output.shape[0], 0, embedding_output.shape[2]),
-                dtype=embedding_output.dtype,
-                device=embedding_output.device,
+                (inputs_embeds.shape[0], 0, inputs_embeds.shape[2]),
+                dtype=inputs_embeds.dtype,
+                device=inputs_embeds.device,
             )
 
         # Repeat visual features to match embedding batch size.
         projected_visual_features = projected_visual_features.repeat(
-            embedding_output.size(0) // projected_visual_features.size(0), 1, 1
+            inputs_embeds.size(0) // projected_visual_features.size(0), 1, 1
         )
 
-        # concatenate patch token and text token embeddings
-        hidden_states = torch.cat((projected_visual_features, embedding_output), dim=1)
+        hidden_states = torch.cat((projected_visual_features, inputs_embeds), dim=1)
 
         if position_ids is None:
             device = input_ids.device if input_ids is not None else inputs_embeds.device
             position_ids = torch.arange(
-                past_key_values_length,
-                seq_length + projected_visual_features.shape[1] + past_key_values_length,
+                past_length,
+                query_length + projected_visual_features.shape[1] + past_length,
                 dtype=torch.long,
                 device=device,
             )
             position_ids = position_ids.unsqueeze(0).view(
-                -1, seq_length + projected_visual_features.shape[1]
+                -1, query_length + projected_visual_features.shape[1]
             )
         else:
             position_ids = position_ids.view(
-                -1, seq_length + projected_visual_features.shape[1]
+                -1, query_length + projected_visual_features.shape[1]
             ).long()
 
-        if self.gradient_checkpointing and self.training:
-            if use_cache:
-                logger.warning_once(
-                    "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`..."
-                )
-                use_cache = False
+        # Prepare head mask if needed
+        # 1.0 in head_mask indicate we keep the head
+        # attention_probs has shape bsz x n_heads x N x N
+        # head_mask has shape n_layer x batch x n_heads x N x N
+        head_mask = self.get_head_mask(head_mask, self.config.n_layer)
+
+        position_embeds = self.wpe(position_ids)
+        hidden_states = hidden_states + position_embeds
+
+        if token_type_ids is not None:
+            token_type_embeds = self.wte(token_type_ids)
+            hidden_states = hidden_states + token_type_embeds
+
+        hidden_states = self.drop(hidden_states)
 
         # By default, an additive causal mask is created
         # for masking the future (one direction).
         tgt_mask = self._generate_future_mask(
-            seq_length, embedding_output.dtype, embedding_output.device
+            query_length, inputs_embeds.dtype, inputs_embeds.device
         )
 
-        # Create an attention mask of shape (batch_size, 1, tgt_seq_len, src_seq_len)
         combined_attention_mask = self.create_attention_mask(
-            tgt=embedding_output,
+            tgt=inputs_embeds,
             memory=projected_visual_features,
             tgt_mask=tgt_mask,
-            past_key_values_length=past_key_values_length,
-        )
+            past_key_values_length=past_length,
+        ).bool()
 
         if attention_mask is not None:
             # if the user provides an attention mask, we add it to the default one
             # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
-            expanded_attn_mask = _expand_mask(
-                attention_mask, embedding_output.dtype, tgt_len=input_shape[-1]
-            ).to(embedding_output.device)
-            if past_key_values_length > 0:
-                expanded_attn_mask = expanded_attn_mask[:, :, -past_key_values_length:, :]
+            expanded_attn_mask = (
+                _expand_mask(attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1])
+                .bool()
+                .to(inputs_embeds.device)
+            )
+            if past_length > 0:
+                expanded_attn_mask = expanded_attn_mask[:, :, -past_length:, :]
             else:
                 combined_attention_mask[
                     :, :, -input_shape[1] :, -input_shape[1] :
-                ] += expanded_attn_mask
+                ] = torch.logical_and(
+                    combined_attention_mask[:, :, -input_shape[1] :, -input_shape[1] :],
+                    expanded_attn_mask,
+                )
 
-        # decoder layers
+        if self.multi_query:
+            combined_attention_mask = combined_attention_mask.transpose(1, 2)
+
+        if past_key_values is None:
+            past_key_values = tuple([None] * len(self.h))
+
+        output_shape = hidden_states.shape  # + (hidden_states.size(-1),)
+
+        presents = [] if use_cache else None
+        all_self_attentions = () if output_attentions else None
+        all_cross_attentions = (
+            () if output_attentions and self.config.add_cross_attention else None
+        )
         all_hidden_states = () if output_hidden_states else None
-        all_self_attns = () if output_attentions else None
-        next_decoder_cache = () if use_cache else None
-        for idx, decoder_layer in enumerate(self.layers):
+        for i, (block, layer_past) in enumerate(zip(self.h, past_key_values)):
             if output_hidden_states:
-                all_hidden_states += (hidden_states,)
-
-            past_key_value = past_key_values[idx] if past_key_values is not None else None
+                all_hidden_states = all_hidden_states + (hidden_states,)
 
             if self.gradient_checkpointing and self.training:
 
                 def create_custom_forward(module):
                     def custom_forward(*inputs):
                         # None for past_key_value
-                        return module(*inputs, output_attentions, None)
+                        return module(*inputs, use_cache, output_attentions)
 
                     return custom_forward
 
-                layer_outputs = torch.utils.checkpoint.checkpoint(
-                    create_custom_forward(decoder_layer),
+                outputs = torch.utils.checkpoint.checkpoint(
+                    create_custom_forward(block),
                     hidden_states,
-                    combined_attention_mask,
-                    position_ids,
                     None,
+                    combined_attention_mask,
+                    head_mask[i],
+                    encoder_hidden_states,
+                    encoder_attention_mask,
                 )
             else:
-                print(combined_attention_mask)
-                layer_outputs = decoder_layer(
+                outputs = block(
                     hidden_states,
+                    layer_past=layer_past,
                     attention_mask=combined_attention_mask,
-                    position_ids=position_ids,
-                    past_key_value=past_key_value,
-                    output_attentions=output_attentions,
+                    head_mask=head_mask[i],
+                    encoder_hidden_states=encoder_hidden_states,
+                    encoder_attention_mask=encoder_attention_mask,
                     use_cache=use_cache,
+                    output_attentions=output_attentions,
                 )
 
-            hidden_states = layer_outputs[0]
-
+            hidden_states = outputs[0]
             if use_cache:
-                next_decoder_cache += (layer_outputs[2 if output_attentions else 1],)
+                presents.append(outputs[1])
 
             if output_attentions:
-                all_self_attns += (layer_outputs[1],)
+                all_self_attentions = all_self_attentions + (outputs[2 if use_cache else 1],)
+                if self.config.add_cross_attention:
+                    all_cross_attentions = all_cross_attentions + (outputs[3 if use_cache else 2],)
 
-        hidden_states = self.norm(hidden_states)
+        hidden_states = self.ln_f(hidden_states)
 
-        # add hidden states from the last decoder layer
+        hidden_states = hidden_states.view(output_shape)
+        # Add last hidden state
         if output_hidden_states:
-            all_hidden_states += (hidden_states,)
+            all_hidden_states = all_hidden_states + (hidden_states,)
 
-        next_cache = next_decoder_cache if use_cache else None
         if not return_dict:
             return tuple(
                 v
-                for v in [hidden_states, next_cache, all_hidden_states, all_self_attns]
+                for v in [
+                    hidden_states,
+                    presents,
+                    all_hidden_states,
+                    all_self_attentions,
+                    all_cross_attentions,
+                ]
                 if v is not None
             )
-        return BaseModelOutputWithPast(
+
+        return BaseModelOutputWithPastAndCrossAttentions(
             last_hidden_state=hidden_states,
-            past_key_values=next_cache,
+            past_key_values=presents,
             hidden_states=all_hidden_states,
-            attentions=all_self_attns,
+            attentions=all_self_attentions,
+            cross_attentions=all_cross_attentions,
         )
 
 
-class GitLlamaForCausalLM(LlamaForCausalLM):
-    config_class = GitLlamaConfig
+class GitGPTBigCodeForCausalLM(GPTBigCodeForCausalLM):
+    config_class = GitGPTBigCodeConfig
 
     def __init__(
         self,
         config,
     ):
-        super(GitLlamaForCausalLM, self).__init__(config)
-        self.model = GitLlamaModel(config)
+        super(GitGPTBigCodeForCausalLM, self).__init__(config)
+        self.model = GitGPTBigCodeModel(config)
 
         # Initialize weights and apply final processing
         self.post_init()
